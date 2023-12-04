@@ -208,7 +208,7 @@ huggingface-cli login
 
 | 训练方法 | 精度 |   7B  |  13B  |  30B  |   65B  |
 | ------- | ---- | ----- | ----- | ----- | ------ |
-| 全参数   |  16  | 140GB | 240GB | 520GB | 1200GB |
+| 全参数   |  16  | 160GB | 320GB | 600GB | 1200GB |
 | 部分参数 |  16  |  20GB |  40GB | 120GB |  240GB |
 | LoRA    |  16  |  16GB |  32GB |  80GB |  160GB |
 | QLoRA   |   8  |  10GB |  16GB |  40GB |   80GB |
@@ -474,6 +474,9 @@ python src/export_model.py \
     --checkpoint_dir path_to_checkpoint \
     --export_dir path_to_export
 ```
+
+> [!WARNING]
+> 尚不支持 GPTQ 量化模型的 LoRA 权重合并及导出。
 
 ### API 服务
 
