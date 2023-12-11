@@ -482,10 +482,10 @@ python src/export_model.py \
 
 ```bash
 python src/api_demo.py \
-    --model_name_or_path path_to_llama_model \
-    --template default \
+    --model_name_or_path /home/lyg/code/model/ChatGLM3-6b/chatglm3-6b \
+    --template chatglm3 \
     --finetuning_type lora \
-    --checkpoint_dir path_to_checkpoint
+    --checkpoint_dir /home/lyg/code/LLaMA-Factory-lyg/saves/ChatGLM3-6B-Chat/lora/train_2023-12-06-17-36-11
 ```
 
 > [!TIP]
