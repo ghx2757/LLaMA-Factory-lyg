@@ -1,4 +1,3 @@
-import os
 import math
 import torch
 from types import MethodType
@@ -13,7 +12,6 @@ from transformers import (
     PreTrainedModel,
     PreTrainedTokenizerBase
 )
-from transformers.models.llama import modeling_llama as LlamaModule
 from transformers.utils.versions import require_version
 from trl import AutoModelForCausalLMWithValueHead
 
@@ -146,9 +144,9 @@ def load_model_and_tokenizer(
             model_args.quantization_bit = None
         config_kwargs["device_map"] = {"": get_current_device()}
         quantization_config = getattr(config, "quantization_config", None)
-        logger.info("Loading {}-bit quantized model.".format(quantization_config.get("bits", -1)))
+        logger.info("Loading {}-bit pre-quantized model.".format(quantization_config.get("bits", -1)))
 
-    # Quantization configurations (using bitsandbytes library)
+    # Quantization configurations (using bitsandbytes)
     if model_args.quantization_bit is not None:
         if is_deepspeed_zero3_enabled():
             raise ValueError("DeepSpeed ZeRO-3 is incompatible with quantization.")
@@ -219,7 +217,7 @@ def load_model_and_tokenizer(
     # Prepare model for inference
     if not is_trainable:
         model.requires_grad_(False) # fix all model params
-        model = model.to(model_args.compute_dtype) if model_args.quantization_bit is None else model
+        model = model.to(model_args.compute_dtype) if not getattr(model, "quantization_method", None) else model
         model.eval()
     else:
         model.train()

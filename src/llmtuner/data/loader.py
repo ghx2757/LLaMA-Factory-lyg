@@ -25,7 +25,7 @@ def get_dataset(
         logger.info("Loading dataset {}...".format(dataset_attr))
 
         data_path, data_name, data_dir, data_files = None, None, None, None
-        if dataset_attr.load_from == "hf_hub":
+        if dataset_attr.load_from in ["hf_hub", "ms_hub"]:
             data_path = dataset_attr.dataset_name
             data_name = dataset_attr.subset
             data_dir = dataset_attr.folder
@@ -53,18 +53,37 @@ def get_dataset(
         else:
             raise NotImplementedError
 
-        dataset = load_dataset(
-            path=data_path,
-            name=data_name,
-            data_dir=data_dir,
-            data_files=data_files,
-            split=data_args.split,
-            cache_dir=model_args.cache_dir,
-            token=model_args.hf_hub_token,
-            streaming=(data_args.streaming and (dataset_attr.load_from != "file"))
-        )
+        if dataset_attr.load_from == "ms_hub":
+            try:
+                from modelscope import MsDataset # type: ignore
+                from modelscope.utils.config_ds import MS_DATASETS_CACHE # type: ignore
 
-        if data_args.streaming and (dataset_attr.load_from == "file"):
+                cache_dir = model_args.cache_dir or MS_DATASETS_CACHE
+                dataset = MsDataset.load(
+                    dataset_name=data_path,
+                    subset_name=data_name,
+                    data_dir=data_dir,
+                    data_files=data_files,
+                    split=data_args.split,
+                    cache_dir=cache_dir,
+                    token=model_args.ms_hub_token,
+                    use_streaming=(data_args.streaming and (dataset_attr.load_from != "file")),
+                ).to_hf_dataset()
+            except ImportError:
+                raise ImportError("Please install modelscope via `pip install modelscope -U`")
+        else:
+            dataset = load_dataset(
+                path=data_path,
+                name=data_name,
+                data_dir=data_dir,
+                data_files=data_files,
+                split=data_args.split,
+                cache_dir=model_args.cache_dir,
+                token=model_args.hf_hub_token,
+                streaming=(data_args.streaming and (dataset_attr.load_from != "file"))
+            )
+
+        if data_args.streaming and (dataset_attr.load_from == "file"): # faster than specifying streaming=True
             dataset = dataset.to_iterable_dataset() # TODO: add num shards parameter
 
         if max_samples is not None: # truncate dataset
@@ -72,8 +91,8 @@ def get_dataset(
 
         def convert_format(examples: Dict[str, List[Any]]) -> Dict[str, List[Any]]:
             # convert dataset from sharegpt format to alpaca format
-            outputs = {"prompt": [], "query": [], "response": [], "history": []}
-            for msg_list in examples[dataset_attr.messages]:
+            outputs = {"prompt": [], "query": [], "response": [], "history": [], "system": []}
+            for i, msg_list in enumerate(examples[dataset_attr.messages]):
                 msg_list = msg_list[:len(msg_list) // 2 * 2] # should be multiples of 2
                 if len(msg_list) == 0:
                     continue
@@ -96,7 +115,8 @@ def get_dataset(
                     outputs["prompt"].append(msg_pairs[-1][0])
                     outputs["query"].append("")
                     outputs["response"].append(msg_pairs[-1][1])
-                    outputs["history"].append(msg_pairs[:-1])
+                    outputs["history"].append(msg_pairs[:-1] if len(msg_pairs) > 1 else None)
+                    outputs["system"].append(examples[dataset_attr.system][i] if dataset_attr.system else "")
 
             return outputs
 
@@ -117,16 +137,9 @@ def get_dataset(
                 **kwargs
             )
         else:
-            for column_name in ["prompt", "query", "response", "history"]: # align dataset
+            for column_name in ["prompt", "query", "response", "history", "system"]: # align dataset
                 if getattr(dataset_attr, column_name) and getattr(dataset_attr, column_name) != column_name:
                     dataset = dataset.rename_column(getattr(dataset_attr, column_name), column_name)
-
-        if dataset_attr.system_prompt: # add system prompt
-            system_prompt = dataset_attr.system_prompt
-            if data_args.streaming:
-                dataset = dataset.map(lambda _: {"system": system_prompt})
-            else:
-                dataset = dataset.add_column("system", [system_prompt] * len(dataset))
 
         all_datasets.append(dataset)
 
