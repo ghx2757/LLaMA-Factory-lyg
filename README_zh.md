@@ -6,7 +6,7 @@
 [![PyPI](https://img.shields.io/pypi/v/llmtuner)](https://pypi.org/project/llmtuner/)
 [![Downloads](https://static.pepy.tech/badge/llmtuner)](https://pypi.org/project/llmtuner/)
 [![GitHub pull request](https://img.shields.io/badge/PRs-welcome-blue)](https://github.com/hiyouga/LLaMA-Factory/pulls)
-[![Discord](https://dcbadge.vercel.app/api/server/c2EPEt5NU?compact=true&style=flat)](https://discord.gg/c2EPEt5NU)
+[![Discord](https://dcbadge.vercel.app/api/server/rKfvV9r9FK?compact=true&style=flat)](https://discord.gg/rKfvV9r9FK)
 [![Spaces](https://img.shields.io/badge/🤗-Open%20In%20Spaces-blue)](https://huggingface.co/spaces/hiyouga/LLaMA-Board)
 [![Studios](https://img.shields.io/badge/ModelScope-Open%20In%20Studios-blue)](https://modelscope.cn/studios/hiyouga/LLaMA-Board)
 
@@ -274,8 +274,8 @@ CUDA_VISIBLE_DEVICES=0 USE_MODELSCOPE_HUB=1 python src/train_web.py
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
     --stage pt \
-    --model_name_or_path path_to_llama_model \
     --do_train \
+    --model_name_or_path path_to_llama_model \
     --dataset wiki_demo \
     --finetuning_type lora \
     --lora_target q_proj,v_proj \
@@ -297,8 +297,8 @@ CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
     --stage sft \
-    --model_name_or_path path_to_llama_model \
     --do_train \
+    --model_name_or_path path_to_llama_model \
     --dataset alpaca_gpt4_zh \
     --template default \
     --finetuning_type lora \
@@ -321,14 +321,14 @@ CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
     --stage rm \
-    --model_name_or_path path_to_llama_model \
     --do_train \
+    --model_name_or_path path_to_llama_model \
+    --adapter_name_or_path path_to_sft_checkpoint \
+    --create_new_adapter \
     --dataset comparison_gpt4_zh \
     --template default \
     --finetuning_type lora \
     --lora_target q_proj,v_proj \
-    --resume_lora_training False \
-    --checkpoint_dir path_to_sft_checkpoint \
     --output_dir path_to_rm_checkpoint \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 4 \
@@ -346,14 +346,14 @@ CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
     --stage ppo \
-    --model_name_or_path path_to_llama_model \
     --do_train \
+    --model_name_or_path path_to_llama_model \
+    --adapter_name_or_path path_to_sft_checkpoint \
+    --create_new_adapter \
     --dataset alpaca_gpt4_zh \
     --template default \
     --finetuning_type lora \
     --lora_target q_proj,v_proj \
-    --resume_lora_training False \
-    --checkpoint_dir path_to_sft_checkpoint \
     --reward_model path_to_rm_checkpoint \
     --output_dir path_to_ppo_checkpoint \
     --per_device_train_batch_size 2 \
@@ -377,14 +377,14 @@ CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
     --stage dpo \
-    --model_name_or_path path_to_llama_model \
     --do_train \
+    --model_name_or_path path_to_llama_model \
+    --adapter_name_or_path path_to_sft_checkpoint \
+    --create_new_adapter \
     --dataset comparison_gpt4_zh \
     --template default \
     --finetuning_type lora \
     --lora_target q_proj,v_proj \
-    --resume_lora_training False \
-    --checkpoint_dir path_to_sft_checkpoint \
     --output_dir path_to_dpo_checkpoint \
     --per_device_train_batch_size 2 \
     --gradient_accumulation_steps 4 \
@@ -472,23 +472,26 @@ deepspeed --num_gpus 8 --master_port=9901 src/train_bash.py \
 ```bash
 python src/export_model.py \
     --model_name_or_path path_to_llama_model \
+    --adapter_name_or_path path_to_checkpoint \
     --template default \
     --finetuning_type lora \
-    --checkpoint_dir path_to_checkpoint \
     --export_dir path_to_export
 ```
 
 > [!WARNING]
-> 尚不支持 GPTQ 量化模型的 LoRA 权重合并及导出。
+> 尚不支持量化模型的 LoRA 权重合并及导出。
+
+> [!TIP]
+> 使用 `--export_quantization_bit 4` 和 `--export_quantization_dataset data/c4_demo.json` 量化导出模型。
 
 ### API 服务
 
 ```bash
 python src/api_demo.py \
-    --model_name_or_path /home/lyg/code/model/ChatGLM3-6b/chatglm3-6b \
-    --template chatglm3 \
-    --finetuning_type lora \
-    --checkpoint_dir /home/lyg/code/LLaMA-Factory-lyg/saves/ChatGLM3-6B-Chat/lora/train_2023-12-06-17-36-11
+    --model_name_or_path path_to_llama_model \
+    --adapter_name_or_path path_to_checkpoint \
+    --template default \
+    --finetuning_type lora
 ```
 
 > [!TIP]
@@ -499,9 +502,9 @@ python src/api_demo.py \
 ```bash
 python src/cli_demo.py \
     --model_name_or_path path_to_llama_model \
+    --adapter_name_or_path path_to_checkpoint \
     --template default \
-    --finetuning_type lora \
-    --checkpoint_dir path_to_checkpoint
+    --finetuning_type lora
 ```
 
 ### 浏览器测试
@@ -509,9 +512,9 @@ python src/cli_demo.py \
 ```bash
 python src/web_demo.py \
     --model_name_or_path path_to_llama_model \
+    --adapter_name_or_path path_to_checkpoint \
     --template default \
-    --finetuning_type lora \
-    --checkpoint_dir path_to_checkpoint
+    --finetuning_type lora
 ```
 
 ### 模型评估
@@ -519,9 +522,9 @@ python src/web_demo.py \
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/evaluate.py \
     --model_name_or_path path_to_llama_model \
-    --finetuning_type lora \
-    --checkpoint_dir path_to_checkpoint \
+    --adapter_name_or_path path_to_checkpoint \
     --template vanilla \
+    --finetuning_type lora \
     --task ceval \
     --split validation \
     --lang zh \
@@ -534,12 +537,12 @@ CUDA_VISIBLE_DEVICES=0 python src/evaluate.py \
 ```bash
 CUDA_VISIBLE_DEVICES=0 python src/train_bash.py \
     --stage sft \
-    --model_name_or_path path_to_llama_model \
     --do_predict \
+    --model_name_or_path path_to_llama_model \
+    --adapter_name_or_path path_to_checkpoint \
     --dataset alpaca_gpt4_zh \
     --template default \
     --finetuning_type lora \
-    --checkpoint_dir path_to_checkpoint \
     --output_dir path_to_predict_result \
     --per_device_eval_batch_size 8 \
     --max_samples 100 \
