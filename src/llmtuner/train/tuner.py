@@ -36,12 +36,17 @@ def run_exp(args: Optional[Dict[str, Any]] = None, callbacks: Optional[List["Tra
 
 def export_model(args: Optional[Dict[str, Any]] = None):
     model_args, _, finetuning_args, _ = get_infer_args(args)
+
+    if model_args.adapter_name_or_path is not None and finetuning_args.export_quantization_bit is not None:
+        raise ValueError("Please merge adapters before quantizing the model.")
+
     model, tokenizer = load_model_and_tokenizer(model_args, finetuning_args)
 
-    if getattr(model, "quantization_method", None) in ["gptq", "awq"]:
-        raise ValueError("Cannot export a GPTQ or AWQ quantized model.")
+    if getattr(model, "quantization_method", None) and model_args.adapter_name_or_path is not None:
+        logger.warning("Cannot merge adapters to a quantized model.")
 
     model.config.use_cache = True
+    model = model.to("cpu")
     model.save_pretrained(finetuning_args.export_dir, max_shard_size="{}GB".format(finetuning_args.export_size))
 
     try:

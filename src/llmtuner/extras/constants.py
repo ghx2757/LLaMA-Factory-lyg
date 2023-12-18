@@ -9,6 +9,15 @@ DEFAULT_MODULE = defaultdict(str)
 
 DEFAULT_TEMPLATE = defaultdict(str)
 
+FILEEXT2TYPE = {
+    "arrow": "arrow",
+    "csv": "csv",
+    "json": "json",
+    "jsonl": "json",
+    "parquet": "parquet",
+    "txt": "text"
+}
+
 IGNORE_INDEX = -100
 
 LAYERNORM_NAMES = {"norm", "ln"}
@@ -16,6 +25,8 @@ LAYERNORM_NAMES = {"norm", "ln"}
 LOG_FILE_NAME = "trainer_log.jsonl"
 
 METHODS = ["full", "freeze", "lora"]
+
+PEFT_METHODS = ["lora"]
 
 SUBJECTS = ["Average", "STEM", "Social Sciences", "Humanities", "Other"]
 
@@ -399,7 +410,8 @@ register_model_group(
             DownloadSource.MODELSCOPE: "AI-ModelScope/Mixtral-8x7B-v0.1"
         },
         "Mixtral-8x7B-Chat": {
-            DownloadSource.DEFAULT: "mistralai/Mixtral-8x7B-Instruct-v0.1"
+            DownloadSource.DEFAULT: "mistralai/Mixtral-8x7B-Instruct-v0.1",
+            DownloadSource.MODELSCOPE: "AI-ModelScope/Mixtral-8x7B-Instruct-v0.1"
         }
     },
     template="mistral"
@@ -565,6 +577,10 @@ register_model_group(
         "XVERSE-13B-Chat": {
             DownloadSource.DEFAULT: "xverse/XVERSE-13B-Chat",
             DownloadSource.MODELSCOPE: "xverse/XVERSE-13B-Chat"
+        },
+        "XVERSE-65B-Chat": {
+            DownloadSource.DEFAULT: "xverse/XVERSE-65B-Chat",
+            DownloadSource.MODELSCOPE: "xverse/XVERSE-65B-Chat"
         }
     },
     template="xverse"
