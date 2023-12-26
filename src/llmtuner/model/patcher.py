@@ -3,14 +3,14 @@ import math
 import torch
 import random
 from types import MethodType
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 from datasets import load_dataset
 
 from transformers import BitsAndBytesConfig, GPTQConfig, PreTrainedModel, PreTrainedTokenizerBase
 from transformers.integrations import is_deepspeed_zero3_enabled
 from transformers.utils.versions import require_version
 
-from llmtuner.extras.constants import FILEEXT2TYPE
+from llmtuner.extras.constants import FILEEXT2TYPE, LAYERNORM_NAMES
 from llmtuner.extras.logging import get_logger
 from llmtuner.extras.misc import get_current_device, infer_optim_dtype
 from llmtuner.extras.packages import is_flash_attn2_available
@@ -18,78 +18,71 @@ from llmtuner.extras.packages import is_flash_attn2_available
 if TYPE_CHECKING:
     from transformers import PretrainedConfig, PreTrainedTokenizer
     from trl import AutoModelForCausalLMWithValueHead
-    from llmtuner.hparams import ModelArguments, FinetuningArguments
+    from llmtuner.hparams import ModelArguments
 
 
 logger = get_logger(__name__)
 SUPPORTED_CLASS_FOR_S2ATTN = [] # TODO: add llama
 
 
-def configure_flashattn(config_kwargs: Dict[str, Any], model_args: "ModelArguments"):
-    if model_args.flash_attn and is_flash_attn2_available():
-        config_kwargs["use_flash_attention_2"] = True
-        logger.info("Using FlashAttention-2 for faster training and inference.")
+def _noisy_mean_initialization(embed_weight: torch.Tensor, num_new_tokens: int):
+    embedding_dim = embed_weight.size(1)
+    avg_weight = embed_weight[:-num_new_tokens].mean(dim=0, keepdim=True)
+    noise_weight = torch.empty_like(avg_weight[-num_new_tokens:])
+    noise_weight.normal_(mean=0, std=(1.0 / math.sqrt(embedding_dim)))
+    embed_weight[-num_new_tokens:] = avg_weight + noise_weight
 
 
-def configure_longlora(config: "PretrainedConfig", model_args: "ModelArguments", is_trainable: bool):
-    if is_trainable and model_args.shift_attn:
-        if getattr(config, "model_type", None) in SUPPORTED_CLASS_FOR_S2ATTN:
-            setattr(config, "group_size_ratio", 0.25)
-            logger.info("Using shift short attention with group_size_ratio=1/4.")
-        else:
-            logger.warning("Current model does not support shift short attention.")
+def _resize_embedding_layer(model: "PreTrainedModel", tokenizer: "PreTrainedTokenizer") -> None:
+    r"""
+    Resize token embeddings.
+    """
+    current_embedding_size = model.get_input_embeddings().weight.size(0)
+    if len(tokenizer) > current_embedding_size:
+        if not isinstance(model.get_output_embeddings(), torch.nn.Linear):
+            logger.warning("Current model does not support resizing token embeddings.")
+            return
+
+        model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=64)
+        new_embedding_size = model.get_input_embeddings().weight.size(0)
+        num_new_tokens = new_embedding_size - current_embedding_size
+        _noisy_mean_initialization(model.get_input_embeddings().weight.data, num_new_tokens)
+        _noisy_mean_initialization(model.get_output_embeddings().weight.data, num_new_tokens)
+
+        logger.info("Resized token embeddings from {} to {}.".format(current_embedding_size, new_embedding_size))
 
 
-def configure_quantization(
-    config: "PretrainedConfig",
-    config_kwargs: Dict[str, Any],
-    tokenizer: "PreTrainedTokenizer",
-    model_args: "ModelArguments",
-    finetuning_args: "FinetuningArguments"
-):
-    if getattr(config, "quantization_config", None): # gptq or awq
-        model_args.quantization_bit = None # remove bnb quantization
-        config_kwargs["device_map"] = {"": get_current_device()}
-        quantization_config = getattr(config, "quantization_config", None)
-        logger.info("Loading {}-bit pre-quantized model.".format(quantization_config.get("bits", -1)))
+def _get_quantization_dataset(tokenizer: "PreTrainedTokenizer", model_args: "ModelArguments") -> List[str]:
+    r"""
+    Inspired by: https://github.com/huggingface/optimum/blob/v1.16.0/optimum/gptq/data.py#L133
+    TODO: remove tokenizer.decode() https://github.com/huggingface/optimum/pull/1600
+    """
+    if os.path.isfile(model_args.export_quantization_dataset):
+        data_path = FILEEXT2TYPE.get(model_args.export_quantization_dataset.split(".")[-1], None)
+        data_files = model_args.export_quantization_dataset
+    else:
+        data_path = model_args.export_quantization_dataset
+        data_files = None
 
-    if model_args.quantization_bit is not None: # bnb
-        if is_deepspeed_zero3_enabled():
-            raise ValueError("DeepSpeed ZeRO-3 is incompatible with quantization.")
+    dataset = load_dataset(path=data_path, data_files=data_files, split="train", cache_dir=model_args.cache_dir)
+    maxlen = model_args.export_quantization_maxlen
 
-        if model_args.quantization_bit == 8:
-            require_version("bitsandbytes>=0.37.0", "To fix: pip install bitsandbytes>=0.37.0")
-            config_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+    samples = []
+    for _ in range(model_args.export_quantization_nsamples):
+        while True:
+            sample_idx = random.randint(0, len(dataset) - 1)
+            sample: Dict[str, torch.Tensor] = tokenizer(dataset[sample_idx]["text"], return_tensors="pt")
+            if sample["input_ids"].size(1) >= maxlen:
+                break # TODO: fix large maxlen
 
-        if model_args.quantization_bit == 4:
-            require_version("bitsandbytes>=0.39.0", "To fix: pip install bitsandbytes>=0.39.0")
-            config_kwargs["quantization_config"] = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=model_args.compute_dtype,
-                bnb_4bit_use_double_quant=model_args.double_quantization,
-                bnb_4bit_quant_type=model_args.quantization_type
-            )
+        word_idx = random.randint(0, sample["input_ids"].size(1) - maxlen - 1)
+        input_ids = sample["input_ids"][:, word_idx : word_idx + maxlen]
+        samples.append(tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True))
 
-        config_kwargs["device_map"] = {"": get_current_device()}
-        logger.info("Quantizing model to {} bit.".format(model_args.quantization_bit))
-
-    if finetuning_args.export_quantization_bit is not None: # gptq
-        require_version("optimum>=1.16.0", "To fix: pip install optimum>=1.16.0")
-        require_version("auto_gptq>=0.5.0", "To fix: pip install auto_gptq>=0.5.0")
-
-        if getattr(config, "model_type", None) == "chatglm":
-            raise ValueError("ChatGLM model is not supported.")
-
-        config_kwargs["quantization_config"] = GPTQConfig(
-            bits=finetuning_args.export_quantization_bit,
-            tokenizer=tokenizer,
-            dataset=get_quantization_dataset(tokenizer, model_args, finetuning_args)
-        )
-        config_kwargs["device_map"] = "auto"
-        logger.info("Quantizing model to {} bit.".format(finetuning_args.export_quantization_bit))
+    return samples
 
 
-def configure_rope(config: "PretrainedConfig", model_args: "ModelArguments", is_trainable: bool):
+def _configure_rope(config: "PretrainedConfig", model_args: "ModelArguments", is_trainable: bool) -> None:
     if model_args.rope_scaling is not None:
         if not hasattr(config, "rope_scaling"):
             logger.warning("Current model does not support RoPE scaling.")
@@ -97,7 +90,7 @@ def configure_rope(config: "PretrainedConfig", model_args: "ModelArguments", is_
             if is_trainable:
                 if model_args.rope_scaling == "dynamic":
                     logger.warning(
-                        "Dynamic NTK may not work well with fine-tuning. "
+                        "Dynamic NTK scaling may not work well with fine-tuning. "
                         "See: https://github.com/huggingface/transformers/pull/24653"
                     )
 
@@ -116,41 +109,125 @@ def configure_rope(config: "PretrainedConfig", model_args: "ModelArguments", is_
             ))
 
 
-def get_quantization_dataset(
+def _configure_flashattn(model_args: "ModelArguments", config_kwargs: Dict[str, Any]) -> None:
+    if model_args.flash_attn and is_flash_attn2_available():
+        config_kwargs["use_flash_attention_2"] = True
+        config_kwargs["torch_dtype"] = model_args.compute_dtype
+        logger.info("Using FlashAttention-2 for faster training and inference.")
+
+
+def _configure_longlora(config: "PretrainedConfig", model_args: "ModelArguments", is_trainable: bool) -> None:
+    if is_trainable and model_args.shift_attn:
+        if getattr(config, "model_type", None) in SUPPORTED_CLASS_FOR_S2ATTN:
+            setattr(config, "group_size_ratio", 0.25)
+            logger.info("Using shift short attention with group_size_ratio=1/4.")
+        else:
+            logger.warning("Current model does not support shift short attention.")
+
+
+def _configure_quantization(
+    config: "PretrainedConfig",
     tokenizer: "PreTrainedTokenizer",
     model_args: "ModelArguments",
-    finetuning_args: "FinetuningArguments"
-) -> List[str]:
+    config_kwargs: Dict[str, Any]
+) -> None:
     r"""
-    Inspired by: https://github.com/huggingface/optimum/blob/v1.16.0/optimum/gptq/data.py#L133
-    TODO: remove tokenizer.decode() https://github.com/huggingface/optimum/pull/1600
+    Priority: Pre-quantized (training) > AutoGPTQ (export) > Bitsandbytes (training)
     """
-    if os.path.isfile(finetuning_args.export_quantization_dataset):
-        data_path = FILEEXT2TYPE.get(finetuning_args.export_quantization_dataset.split(".")[-1], None)
-        data_files = finetuning_args.export_quantization_dataset
-    else:
-        data_path = finetuning_args.export_quantization_dataset
-        data_files = None
+    if getattr(config, "quantization_config", None): # gptq or awq
+        if is_deepspeed_zero3_enabled():
+            raise ValueError("DeepSpeed ZeRO-3 is incompatible with quantization.")
 
-    dataset = load_dataset(path=data_path, data_files=data_files, split="train", cache_dir=model_args.cache_dir)
-    maxlen = finetuning_args.export_quantization_maxlen
+        config_kwargs["device_map"] = {"": get_current_device()}
+        quantization_config = getattr(config, "quantization_config", None)
+        logger.info("Loading {}-bit pre-quantized model.".format(quantization_config.get("bits", -1)))
 
-    samples = []
-    for _ in range(finetuning_args.export_quantization_nsamples):
-        while True:
-            sample_idx = random.randint(0, len(dataset) - 1)
-            sample: Dict[str, torch.Tensor] = tokenizer(dataset[sample_idx]["text"], return_tensors="pt")
-            if sample["input_ids"].size(1) >= maxlen:
-                break # TODO: fix large maxlen
+    elif model_args.export_quantization_bit is not None: # gptq
+        require_version("optimum>=1.16.0", "To fix: pip install optimum>=1.16.0")
+        require_version("auto_gptq>=0.5.0", "To fix: pip install auto_gptq>=0.5.0")
+        from accelerate.utils import get_max_memory
 
-        word_idx = random.randint(0, sample["input_ids"].size(1) - maxlen - 1)
-        input_ids = sample["input_ids"][:, word_idx:word_idx+maxlen]
-        samples.append(tokenizer.decode(input_ids[0].tolist(), skip_special_tokens=True))
+        if getattr(config, "model_type", None) == "chatglm":
+            raise ValueError("ChatGLM model is not supported.")
 
-    return samples
+        config_kwargs["quantization_config"] = GPTQConfig(
+            bits=model_args.export_quantization_bit,
+            tokenizer=tokenizer,
+            dataset=_get_quantization_dataset(tokenizer, model_args)
+        )
+        config_kwargs["device_map"] = "auto"
+        config_kwargs["max_memory"] = get_max_memory()
+        logger.info("Quantizing model to {} bit.".format(model_args.export_quantization_bit))
+
+    elif model_args.quantization_bit is not None: # bnb
+        if is_deepspeed_zero3_enabled():
+            raise ValueError("DeepSpeed ZeRO-3 is incompatible with quantization.")
+
+        if model_args.quantization_bit == 8:
+            require_version("bitsandbytes>=0.37.0", "To fix: pip install bitsandbytes>=0.37.0")
+            config_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+
+        elif model_args.quantization_bit == 4:
+            require_version("bitsandbytes>=0.39.0", "To fix: pip install bitsandbytes>=0.39.0")
+            config_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=model_args.compute_dtype,
+                bnb_4bit_use_double_quant=model_args.double_quantization,
+                bnb_4bit_quant_type=model_args.quantization_type
+            )
+
+        config_kwargs["device_map"] = {"": get_current_device()}
+        logger.info("Quantizing model to {} bit.".format(model_args.quantization_bit))
 
 
-def patch_config(config: "PretrainedConfig", model_args: "ModelArguments"):
+def _prepare_model_for_training(
+    model: "PreTrainedModel",
+    model_args: "ModelArguments",
+    output_layer_name: Optional[str] = "lm_head"
+) -> None:
+    r"""
+    Includes:
+        (1) cast the layernorm in fp32
+        (2) make output embedding layer require grads
+        (3) add the upcasting of the lm_head in fp32
+    Inspired by: https://github.com/huggingface/peft/blob/v0.7.1/src/peft/utils/other.py#L72
+    """
+    if model_args.upcast_layernorm:
+        for name, param in model.named_parameters():
+            if param.ndim == 1 and any(ln_name in name for ln_name in LAYERNORM_NAMES):
+                param.data = param.data.to(torch.float32)
+        logger.info("Upcasting layernorm weights in float32.")
+
+    if not model_args.disable_gradient_checkpointing:
+        if not getattr(model, "supports_gradient_checkpointing", False):
+            logger.warning("Current model does not support gradient checkpointing.")
+        else:
+            model.enable_input_require_grads()
+            model.gradient_checkpointing_enable()
+            model.config.use_cache = False # turn off when gradient checkpointing is enabled
+            logger.info("Gradient checkpointing enabled.")
+
+    if hasattr(model, output_layer_name):
+        def fp32_forward_post_hook(module: torch.nn.Module, args: Tuple[torch.Tensor], output: torch.Tensor):
+            return output.to(torch.float32)
+
+        output_layer = getattr(model, output_layer_name)
+        if isinstance(output_layer, torch.nn.Linear) and output_layer.weight.dtype != torch.float32:
+            output_layer.register_forward_hook(fp32_forward_post_hook)
+
+
+def patch_tokenizer(tokenizer: "PreTrainedTokenizer") -> None:
+    if "PreTrainedTokenizerBase" not in str(tokenizer._pad.__func__):
+        tokenizer._pad = MethodType(PreTrainedTokenizerBase._pad, tokenizer)
+
+
+def patch_config(
+    config: "PretrainedConfig",
+    tokenizer: "PreTrainedTokenizer",
+    model_args: "ModelArguments",
+    config_kwargs: Dict[str, Any],
+    is_trainable: bool
+) -> None:
     if model_args.compute_dtype is None: # priority: bf16 > fp16 > fp32
         model_args.compute_dtype = infer_optim_dtype(model_dtype=getattr(config, "torch_dtype", None))
     setattr(config, "torch_dtype", model_args.compute_dtype)
@@ -159,8 +236,18 @@ def patch_config(config: "PretrainedConfig", model_args: "ModelArguments"):
         for dtype_name, dtype in [("fp16", torch.float16), ("bf16", torch.bfloat16), ("fp32", torch.float32)]:
             setattr(config, dtype_name, getattr(config, "torch_dtype", None) == dtype)
 
+    _configure_rope(config, model_args, is_trainable)
+    _configure_flashattn(model_args, config_kwargs)
+    _configure_longlora(config, model_args, is_trainable)
+    _configure_quantization(config, tokenizer, model_args, config_kwargs)
 
-def patch_model(model: "PreTrainedModel"):
+
+def patch_model(
+    model: "PreTrainedModel",
+    tokenizer: "PreTrainedTokenizer",
+    model_args: "ModelArguments",
+    is_trainable: bool
+) -> None:
     if "GenerationMixin" not in str(model.generate.__func__):
         model.generate = MethodType(PreTrainedModel.generate, model)
 
@@ -168,17 +255,26 @@ def patch_model(model: "PreTrainedModel"):
         setattr(model, "lm_head", model.transformer.output_layer)
         setattr(model, "_keys_to_ignore_on_save", ["lm_head.weight"])
 
+    if model_args.resize_vocab:
+        if is_deepspeed_zero3_enabled():
+            raise ValueError("DeepSpeed ZeRO-3 is incompatible with vocab resizing.")
 
-def patch_valuehead_model(model: "AutoModelForCausalLMWithValueHead"):
+        _resize_embedding_layer(model, tokenizer)
+
+    if is_trainable:
+        _prepare_model_for_training(model, model_args)
+
+
+def patch_valuehead_model(model: "AutoModelForCausalLMWithValueHead") -> None:
+    def tie_weights(self: "AutoModelForCausalLMWithValueHead") -> None:
+        if isinstance(self.pretrained_model, PreTrainedModel):
+            self.pretrained_model.tie_weights()
+
     def get_input_embeddings(self: "AutoModelForCausalLMWithValueHead") -> torch.nn.Module:
-        return self.pretrained_model.get_input_embeddings()
+        if isinstance(self.pretrained_model, PreTrainedModel):
+            return self.pretrained_model.get_input_embeddings()
 
-    setattr(model, "get_input_embeddings", MethodType(get_input_embeddings, model))
     ignore_modules = [name for name, _ in model.named_parameters() if "pretrained_model" in name]
     setattr(model, "_keys_to_ignore_on_save", ignore_modules)
-    setattr(model, "tie_weights", MethodType(lambda _: None, model)) # use empty method
-
-
-def patch_tokenizer(tokenizer: "PreTrainedTokenizer"):
-    if "PreTrainedTokenizerBase" not in str(tokenizer._pad.__func__):
-        tokenizer._pad = MethodType(PreTrainedTokenizerBase._pad, tokenizer)
+    setattr(model, "tie_weights", MethodType(tie_weights, model))
+    setattr(model, "get_input_embeddings", MethodType(get_input_embeddings, model))
