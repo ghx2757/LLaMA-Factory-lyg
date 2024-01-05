@@ -60,7 +60,7 @@ def load_model_and_tokenizer(
 
     model = None
     if is_trainable and model_args.use_unsloth:
-        require_version("unsloth==2023.12", "Follow the instructions at: https://github.com/unslothai/unsloth")
+        require_version("unsloth", "Follow the instructions at: https://github.com/unslothai/unsloth")
         from unsloth import FastLlamaModel, FastMistralModel # type: ignore
         unsloth_kwargs = {
             "model_name": model_args.model_name_or_path,
@@ -87,11 +87,11 @@ def load_model_and_tokenizer(
         model = AutoModelForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             config=config,
+            torch_dtype=model_args.compute_dtype,
             low_cpu_mem_usage=(not is_deepspeed_zero3_enabled()),
             **config_kwargs
         )
 
-    model = model.to(model_args.compute_dtype) if not getattr(model, "quantization_method", None) else model
     patch_model(model, tokenizer, model_args, is_trainable)
     register_autoclass(config, model, tokenizer)
 
@@ -113,6 +113,7 @@ def load_model_and_tokenizer(
 
     if not is_trainable:
         model.requires_grad_(False)
+        model = model.to(model_args.compute_dtype) if not getattr(model, "quantization_method", None) else model
         model.eval()
     else:
         model.train()
